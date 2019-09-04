@@ -1,0 +1,9 @@
+
+set(LIB_SOURCES 0_gf2_modu.f90 energy.f90 fockgauss.f90 inigrids.f90  mu_dens.f90 print_g_se.f90 print_sigma_om.f90
+             read_input.f90 sigma.f90 load_balancer.f90 aux_library.f90 fetch.f90 ft.f90 legendre.f90 mlpn.f90 pbc_specific.f90
+             print_se_real.f90 read_proc_k.f90 timest.f90 gf2solver.f90 mu_solver.f90 SparseMatrix.f90
+             common_inversion.f90 )
+             
+add_library(gf2-common-lib ${LIB_SOURCES})
+
+#target_lib_library(gf2-common-lib )

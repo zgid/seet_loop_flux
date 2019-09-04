@@ -1,0 +1,1270 @@
+subroutine seet_main_loop(Fk,Sk,dm_r,sig_sol_loc_ndc,sigma_inf_loc,E1_old,nts)
+  use seet
+  use gf2, only : nk,nao,iwmax,beta,omegas,ncell,mu,nuniform,nleg,Sigma_tau
+  implicit none
+  integer nts
+  double precision E1_old 
+  complex*16, dimension(nao,nao,2*nk) :: Fk,Sk
+  complex*16, dimension(nao,nao,iwmax)::sig_sol_loc_ndc
+  complex*16, dimension(nao,nao,ncell)::dm_r
+  complex*16, dimension(nao,nao)::sigma_inf_loc
+  complex*16, allocatable, dimension(:,:) :: Fr,Sr,sigma_inf_loc_old,sigma_inf_imp,sigma_inf_gf2_imp
+  complex*16, dimension(:,:,:),allocatable :: Grcsw,deltarw,Gtloc,Gtloc_aux,xmatk,G_sol,sigma_imp,G0_inv,Skk,Fkk
+  complex*16, dimension(:,:,:),allocatable :: sigmaw,sigmagf2t,sig_sol_loc_ndc_old,sigma_gf2_loc,sigmagf2loc_w
+  double precision, dimension(:,:,:,:),allocatable ::vint,vintf
+  double precision, dimension(:,:),allocatable ::wannier
+  complex*16, dimension(:),allocatable ::dm_eig_k
+  complex*16, dimension(:,:,:,:),allocatable ::siglk       
+  integer i,j,k,l,n,m,n1,m1,w,norb,iter_seet,nf
+  integer iv,jv,kv,lv,ic,jc,kc,lc
+  logical conv,nodm,print_sigl
+  double precision E_S0,E_corr,energy_seet,energy_seet_old
+  logical exist
+  character*256 file_name_11, file_name_12
+
+  thr_seet = 1.0d-4
+  
+  call read_in_info_for_seet 
+  
+
+  allocate(xmatk(nao,nao,2*nk))
+  allocate(wannier(ncell*nao,nao))
+  allocate(Skk(nao,nao,2*nk))
+  allocate(Fkk(nao,nao,2*nk))
+  allocate(sigmagf2loc_w(nao,nao,iwmax))   
+  Fkk(:,:,:)=Fk(:,:,:)
+  Skk(:,:,:)=Sk(:,:,:)
+  nf=nao*ncell
+  allocate(vintf(nf,nf,nf,nf))   
+  call read_all_integrals(vintf,nf)
+  !call read_all_integrals_txt(vintf,nf)
+
+  if (ortho_basis) call pbc_sao(Skk,wannier,xmatk)     
+
+  if (dm_basis) then
+     allocate(dm_eig_k(nao))
+     call prepare_density_matrix_basis(Skk,xmatk,dm_eig_k,dm_r)
+     !here some choice of the vectors will need to be made
+     deallocate(dm_eig_k)
+  end if
+
+  allocate(siglk(nao,nao,0:nleg,2*nk))
+  siglk=dcmplx(0.0d0,0.0d0)
+  write(*,*)"I am here 1"
+  call flush(6)
+  call flush(6)
+  call get_sigma_kl(siglk,nts,nuniform)
+  write(*,*)"I am here after get_sigma_kl"
+  call flush(6)
+
+  allocate(Sr(nao,nao))
+  allocate(Fr(nao,nao))
+
+  allocate(Grcsw(nao,nao,iwmax))
+  allocate(Gtloc(nao,nao,nts))
+
+  allocate(sigmaw(nao,nao,iwmax))
+  allocate(sigmagf2t(nao,nao,nts))
+
+  allocate(sig_sol_loc_ndc_old(nao,nao,iwmax))  
+  allocate(sigma_inf_loc_old(nao,nao))
+
+
+  conv=.false.
+  sigmagf2t=dcmplx(0.0d0,0.0d0)
+  sig_sol_loc_ndc=dcmplx(0.0d0,0.0d0)       
+
+  sig_sol_loc_ndc_old=sig_sol_loc_ndc
+  sigma_inf_loc=dcmplx(0.0d0,0.0d0) 
+  sigma_inf_loc_old=sigma_inf_loc
+
+  energy_seet_old=0.0d0
+
+  do iter_seet=1,niter_seet
+     if (.not. conv) then
+        write(*,*)"before prepare_quantities_for_seet"
+        call prepare_quantities_for_seet(Fkk,Skk,siglk,xmatk,sig_sol_loc_ndc_old,sigma_inf_loc_old,Grcsw,sigmaw,Gtloc,Sr,Fr,nts,iter_seet)
+        !write(*,*) sigmaw(:,:,1)
+        write(*,*)"after prepare_quantities_for_seet"
+
+        call flush(6)
+        do i=1,num_imp
+           norb=num_orb_in_imps(i)
+           allocate(vint(norb,norb,norb,norb))
+           call transform_impurity_vint(wannier,vintf,vint,norb,i)       
+
+           allocate(sigma_inf_imp(norb,norb))
+           allocate(deltarw(norb,norb,iwmax))
+           allocate(Gtloc_aux(norb,norb,nts))
+
+           allocate(G_sol(norb,norb,iwmax))
+           allocate(sigma_imp(norb,norb,iwmax)) 
+           allocate(G0_inv(norb,norb,iwmax)) 
+
+           if(iter_seet == 1) then
+              allocate(sigma_inf_gf2_imp(norb,norb))   
+           end if
+           call eval_hybrid(sig_sol_loc_ndc_old,sigma_inf_loc_old,Grcsw,sigmaw,deltarw,Sr,Fr,norb,sigma_inf_gf2_imp,vint,i,iter_seet)
+           write(*,*)"after eval_hybri"
+           call flush(6)
+
+           !write(*,*) "sigma_inf_gf2_imp"
+           !write(*,*) sigma_inf_gf2_imp(:,:)
+           !write(*,*) "============="
+
+           ! BGN lantran
+!!           ! fitting the hybridization
+!!           write(*,*)"before fitting bath"
+!!           call system("cp fitting_bath.out fitting_bath.out_prev")
+!!           call system("/export/apps/Python/2.7.2-CentOS6.0/bin/python /export/zgid/latran/seet_loop_flux/fit_bath_pyf/hybrid.py > fitting_bath.out")
+!!           write(*,*)"after fitting bath"
+           !stop
+
+           ! calling the solver
+!!           write(*,*)"before calling solver"
+!!           call system("cp G_sol.txt G_sol.txt.sv")
+!!           call system("rm -rf ground* spec*")
+!!           call system("/export/apps/Python/2.7.2-CentOS6.0/bin/python /export/zgid/latran/seet_loop_flux/solvers/solver_2.py > calling_solver.out")
+!!           write(*,*)"after calling solver"
+           ! END lantran
+
+           call read_in_G_from_solver(G_sol,norb)
+
+           !call system("rm -rf Gsol*")
+           !write(file_name_11,fmt='(A7,I0,A4)') 'Gsol11_',iter_seet,'.txt'
+           !write(file_name_12,fmt='(A7,I0,A4)') 'Gsol12_',iter_seet,'.txt'
+           !open(1000,file=file_name_11,status='new')
+           !open(1001,file=file_name_12,status='new')
+           !do w=1,200
+           !   write(1000,*)w, dble(G_sol(1,1,w)), dimag(G_sol(1,1,w)) 
+           !   write(1001,*)w, dble(G_sol(1,2,w)), dimag(G_sol(1,2,w))
+           !end do
+           !close(1000)
+           !close(1001)
+
+           write(*,*)"after read_in_G_from_solver"
+           call flush(6)
+
+           Gtloc_aux=dcmplx(0.0d0,0.0d0)
+           !sigma_gf2_loc=dcmplx(0.0d0,0.0d0)
+           do m=1,norb
+              do n=1,norb
+                 m1=imp_orb_numbers(i,m)
+                 n1=imp_orb_numbers(i,n) 
+                 Gtloc_aux(m,n,:)=Gtloc(m1,n1,:)
+              end do
+           end do
+           
+           write(*,*)"before calc_sigmaGF2_loc"
+           call flush(6)
+
+           if(iter_seet==1) then
+              allocate(sigma_gf2_loc(norb,norb,nts))
+              call calc_sigmaGF2_loc(Gtloc_aux,sigma_gf2_loc,vint,norb,nts)
+           end if
+
+           !write(*,*)"sigma_gf2_loc"
+           !write(*,*) sigma_gf2_loc(:,:,1)
+           !write(*,*) "=========="
+
+           !building Go=[(iw+mu)-t-\sigma_infty^GF2-delta]^{-1} to evaluate self-energy from a solver
+           call flush(6)
+                   
+           call calc_sigma_inf_imp(G_sol,norb,sigma_inf_imp,vint,nts)  
+        
+           call eval_G0_inv(Fr,Sr,sigma_inf_gf2_imp,deltarw,G0_inv,norb,i)
+
+           write(*,*)"eval_G0_inv"
+           call flush(6) 
+           ! evaluate sigma in the impurity
+           ! note this sigma_imp contains both the sigma_infty_corr plus sigma_iw_imp. 
+           !sigma_infty_corr is a CI correction to the sigma_infty obtained in GF2 or other methods. 
+           call eval_dyson_impurity(G0_inv,sigma_imp,G_sol,norb)
+           
+           write(*,*)"eval_dyson_impurity"
+           call flush(6) 
+           ! inscribe this sigma into all the unit cell orbitals
+           
+           do m=1,norb
+              do n=1,norb
+                 m1=imp_orb_numbers(i,m)
+                 n1=imp_orb_numbers(i,n) 
+                 sig_sol_loc_ndc(m1,n1,:)=sigma_imp(m,n,:)-sigma_inf_imp(m,n)
+                 if (HF_SEET) then
+                    sigma_inf_loc(m1,n1)=sigma_inf_imp(m,n)-sigma_inf_gf2_imp(m,n)
+                    sigmagf2t(m1,n1,:)=dcmplx(0.0d0,0.0d0)
+                 else
+                    sigma_inf_loc(m1,n1)=sigma_inf_imp(m,n)-sigma_inf_gf2_imp(m,n)
+                    sigmagf2t(m1,n1,:)=sigma_gf2_loc(m,n,:)        
+                 end if
+              end do
+           end do
+
+           do w=1,iwmax
+              write(*,*) w, dble(sig_sol_loc_ndc(1,1,w)),dimag(sig_sol_loc_ndc(1,1,w))
+           end do
+
+           deallocate(vint)           
+           deallocate(sigma_inf_imp)
+           deallocate(deltarw)
+           deallocate(Gtloc_aux)
+
+           deallocate(G_sol)
+           deallocate(sigma_imp)
+           deallocate(G0_inv)
+
+        end do
+        write(*,*)"out of last loop" 
+
+        call flush(6)
+        !We should transform sigma_gf2_loc to the omega representation so that we can use it later
+        call transform_t_to_w_sigmaGF2_loc(sigmagf2t,sigmagf2loc_w,nts)
+        !write(*,*) "sigmagf2loc_w"
+        !write(*,*) sigmagf2loc_w(:,:,1)
+        !write(*,*) "==============="
+   
+        !now subtract this local gf2 sigma from the full sigma that we have gotten form the solver
+        ! Let's evaluate sigma_inf=sigma_inf=sigma_inf_solver-sigma_inf_gf2
+        
+        write(*,*)"after transform_t_to_w_sigmaGF2_loc" 
+        call flush(6)
+        
+        do i=1,nao
+           do j=1,nao
+              sig_sol_loc_ndc(i,j,:)=sig_sol_loc_ndc(i,j,:)-sigmagf2loc_w(i,j,:)
+              !sigma_inf_loc(i,j)=sigma_inf_loc(i,j)-sigma_inf_gf2_imp(i,j)
+              !do w=1,iwmax
+              !   sig_sol_loc_ndc(i,j,w)=sig_sol_loc_ndc(i,j,w)-sigma_inf_loc(i,j)
+              !end do
+              
+           end do
+        end do
+       
+        !transform sigma to the orginal basis
+        sig_sol_loc_ndc_old=sig_sol_loc_ndc
+        sigma_inf_loc_old=sigma_inf_loc
+
+        write(*,*)"before transform sigma"
+        call flush(6)
+
+        call transform_sigma(sig_sol_loc_ndc,sigma_inf_loc,xmatk)  
+        !now evaluate new chemical potential and Green's function
+        print_sigl=.false.
+        !if (fock_reeval)then
+        !nodm=.false.
+        !else
+        !   nodm=.true. 
+        !end if
+
+        nodm=.false.
+
+
+        write(*,*)"after transform sigma"
+        
+        call flush(6)
+
+        dm_r(:,:,:)=dcmplx(0.0d0,0.0d0)
+        call mu_dens(Fk,Sk,dm_r,sig_sol_loc_ndc,sigma_inf_loc,nts,print_sigl,nodm)
+
+
+        write(*,*)"------------"
+        write(*,*) dm_r(:,:,1)
+        write(*,*)"------------"
+
+        write(*,*)"after mu_dens"
+        call flush(6)
+        
+        write(*,*)"before calc_energy_freq_depend_old"
+        call flush(6)
+        
+        !sig_sol_loc_ndc = dcmplx(0.0d0,0.0d0)
+        !sigma_inf_loc = dcmplx(0.0d0,0.0d0)
+        inquire(file="recontract_seet.com", exist=exist)
+        if(exist) then
+           call system("cp recontract_seet.com gaussian_tmp/recontract.com")
+        end if
+        call fock_gauss(dm_r,E_S0,iter_seet)
+        call calc_energy_freq_depend_old(mu,Fk,Sk,sig_sol_loc_ndc,sigma_inf_loc,E_corr,nts,nuniform,iter_seet)
+     
+
+        write(*,*)"after calc_energy_freq_depend_old"
+        call flush(6)
+        
+        !now evalute energy
+        ! To evaluate energy we need to split sigma into sigma_inf+sigma_iw
+        !if (fock_reeval)then 
+        !call update_Fk(Fk)
+        !
+        !else
+        !   E_S0=E1_old
+        !end if
+        
+        write(*,*)"energy for iteration ", iter_seet
+        energy_seet=E_S0+E_corr
+        write(*,*) ' E_S0', E_S0
+        write(*,*) ' energy_seet', energy_seet
+        write(*,*) ' energy diff:', energy_seet-energy_seet_old
+        if (dabs(energy_seet-energy_seet_old)<=thr_seet) then
+           conv=.true.
+        end if
+        energy_seet_old=energy_seet
+     end if
+     write(*,*)"next iteration",conv
+     call flush(6)
+     stop
+  end do
+
+  deallocate(sigma_gf2_loc)
+  deallocate(sigma_inf_gf2_imp)
+  deallocate(vintf)
+  deallocate(wannier)
+  deallocate(xmatk)
+  deallocate(Skk)
+  deallocate(Fkk)
+  deallocate(sigmagf2loc_w)
+  deallocate(Grcsw)
+  deallocate(Sr)
+  deallocate(Fr)
+  deallocate(sigmaw)
+  deallocate(sigmagf2t)
+  deallocate(Gtloc)
+  deallocate(sig_sol_loc_ndc_old)
+  deallocate(sigma_inf_loc_old)
+  deallocate(siglk)
+
+end subroutine seet_main_loop
+
+subroutine calc_sigma_inf_imp(G_sol,norb,sigma_inf_imp,vint,nts)
+  use gf2, only: iwmax, nao,omegas,beta
+  implicit none
+  integer norb,nts
+  complex*16, dimension(norb,norb,iwmax)::G_sol
+  complex*16, dimension(norb,norb)::sigma_inf_imp
+  double precision, dimension(norb,norb,norb,norb)::vint
+  double precision, save::pi=4.D0*DATAN(1.D0)  
+
+  complex*16, dimension(:,:),allocatable::G1,Gtloc,Grcs
+  
+  integer i,j,k,l,w,t
+  double precision taun
+
+  allocate(G1(norb,norb),Gtloc(norb,norb),Grcs(norb,norb))
+  G1=dcmplx(0.0d0,0.0d0)
+  do i=1,norb
+     G1(i,i)=dcmplx(1.0d0,0.0d0)     
+  end do
+  Gtloc=dcmplx(0.0d0,0.0d0)   
+
+  taun=pi  
+  do w =1,iwmax     
+     Grcs(:,:)=G_sol(:,:,w)   
+     Grcs(:,:)=Grcs(:,:)-G1(:,:)/omegas(w)
+     call ft_w_tau_inner(Grcs(:,:),Gtloc(:,:),norb,w,taun,beta)
+  end do
+
+  t=nts
+  Gtloc(:,:)=Gtloc(:,:)-0.5*G1(:,:)
+  !now this is just G(beta) while we need density matrix
+
+  Gtloc(:,:)=-2.0d0*Gtloc(:,:)
+
+  sigma_inf_imp=dcmplx(0.0d0,0.0d0)
+  do i=1,norb
+     do j=1,norb
+        do k=1,norb
+           do l=1,norb
+              sigma_inf_imp(i,j)=sigma_inf_imp(i,j)+Gtloc(k,l)*(vint(i,j,k,l)-0.5d0*vint(i,l,k,j))
+           end do
+        end do
+     end do
+  end do
+
+!  do i=1,norb
+!     do j=1,norb
+!        write(*,*)"sigma_inf_imp",i,j,sigma_inf_imp(i,j),Gtloc(i,j)
+!     end do
+!  end do
+
+  deallocate(G1,Gtloc,Grcs) 
+
+end subroutine calc_sigma_inf_imp
+
+subroutine transform_sigma(sig_sol_loc_ndc,sigma_inf_loc,xmatk)
+  use gf2, only: iwmax, nao,nk
+  implicit none       
+  complex*16, dimension(nao,nao,iwmax):: sig_sol_loc_ndc
+  complex*16, dimension(nao,nao):: sigma_inf_loc
+  complex*16, dimension(nao,nao,2*nk) :: xmatk
+  complex*16, dimension(:,:,:),allocatable ::matrixk,xmatkn
+  integer k,w,ic,i,j
+
+  allocate(matrixk(nao,nao,2*nk)) 
+  allocate(xmatkn(nao,nao,2*nk)) 
+  xmatkn=xmatk
+  do k=1,2*nk
+     call invert_complex_matrix(nao,xmatkn(:,:,k))
+  end do
+
+  do w=1,iwmax
+     do k=1,2*nk
+        matrixk(:,:,k)=sig_sol_loc_ndc(:,:,w)
+     end do
+     call transform_k_space_freq_indep_matrices(matrixk,xmatkn)
+     ic=1
+     sig_sol_loc_ndc(:,:,w)=dcmplx(0.0d0,0.0d0)
+     call FT_k_to_r_ic(matrixk(:,:,:),sig_sol_loc_ndc(:,:,w),ic)
+  end do
+
+
+  do k=1,2*nk
+     matrixk(:,:,k)=sigma_inf_loc(:,:)
+  end do
+  call transform_k_space_freq_indep_matrices(matrixk,xmatkn)
+  ic=1
+  sigma_inf_loc=dcmplx(0.0d0,0.0d0)
+  call FT_k_to_r_ic(matrixk(:,:,:),sigma_inf_loc(:,:),ic)
+
+
+  deallocate(matrixk)
+  deallocate(xmatkn)
+
+end subroutine transform_sigma
+
+subroutine transform_t_to_w_sigmaGF2_loc(sigmagf2t,sigmagf2loc_w,nts)  
+  use gf2, only:nuniform,nao,nleg,iwmax
+  implicit none
+  integer nts
+  complex*16, dimension(nao,nao,nts) ::sigmagf2t
+  complex*16, dimension(nao,nao,nts) ::sigmagf2loc_w
+  complex*16, dimension(:,:,:),allocatable :: rsig,isig,sigl
+  integer w
+  
+  allocate(rsig(nao,nao,0:nleg),isig(nao,nao,0:nleg),sigl(1:nao,1:nao,0:nleg))
+  
+  call calc_sigl_from_sigtau(nts,nuniform,rsig,dble(sigmagf2t(:,:,:)))
+  call calc_sigl_from_sigtau(nts,nuniform,isig,dimag(sigmagf2t(:,:,:)))
+  
+  sigl(:,:,:)=rsig(:,:,:)+dcmplx(0.0d0,1.0d0)*isig(:,:,:)
+  
+  
+  do w=1,iwmax
+     call calc_sigw_using_tnl_inner(w,sigmagf2loc_w(:,:,w),sigl(:,:,:))      
+  end do
+  
+  deallocate(rsig,isig,sigl)
+  
+end subroutine transform_t_to_w_sigmaGF2_loc
+
+
+subroutine eval_G0_inv(Fr,Sr,sigma_inf,deltarw,G0_inv,norb,imp)
+  use seet   
+  use gf2,only: nao,iwmax,omegas,mu
+  implicit none
+  integer norb,imp
+  complex*16, dimension(nao,nao)::Sr,Fr,sigma_inf
+  complex*16, dimension(norb,norb,iwmax)::deltarw,G0_inv         
+  integer i,j,k,l,p,q,ic,w
+  complex*16 muomega
+
+
+
+  ic=cells_seet   
+  do w=1,iwmax
+     muomega =omegas(w)+mu
+     do p=1,norb
+        do q=1,norb
+           i=imp_orb_numbers(imp,p)
+           j=imp_orb_numbers(imp,q)
+           G0_inv(p,q,w)=muomega*Sr(i,j)-(Fr(i,j)-sigma_inf(p,q))-deltarw(p,q,w)
+!           G0_inv(p,q,w)=muomega*Sr(i,j)-(Fr(i,j))-deltarw(p,q,w)
+        end do
+     end do
+  end do
+
+
+
+end subroutine eval_G0_inv
+
+
+subroutine eval_dyson_impurity(G0_inv,sigma_imp,G_sol,norb)  
+   use seet
+   use gf2,only: iwmax,omegas
+   implicit none
+   integer norb
+   complex*16, dimension(norb,norb,iwmax)::G0_inv,G_sol,sigma_imp
+   complex*16, dimension(:,:),allocatable::G_sub_inv
+   integer w
+
+   allocate(G_sub_inv(norb,norb))
+
+   sigma_imp=dcmplx(0.0d0,0.0d0)
+
+   write(*,*) "in dyson routine ========================================"
+   do w=1,iwmax
+      G_sub_inv=dcmplx(0.0d0,0.0d0)
+      G_sub_inv(:,:)=G_sol(:,:,w)
+      call invert_complex_matrix(norb,G_sub_inv)   
+      sigma_imp(:,:,w)=G0_inv(:,:,w)-G_sub_inv(:,:)
+
+      write(*,*) w, dble(sigma_imp(1,1,w)),dimag(sigma_imp(1,1,w))
+
+   end do
+   write(*,*) "========================================"
+   
+   deallocate(G_sub_inv)
+      
+
+end subroutine eval_dyson_impurity
+
+subroutine calc_sigmaGF2_loc(Grt,sigma,vint,norb,nts)
+  implicit none
+  integer norb,nts
+  integer ip, jp,np
+  integer i, m, q, k, j, n, l, p,t
+  complex*16, dimension(norb,norb,nts)::sigma,Grt
+  double precision, dimension(norb,norb,norb,norb)::vint
+  integer, dimension(:,:),allocatable:: map
+  double precision, dimension(:),allocatable::U
+  complex*16, dimension(:,:,:),allocatable::gd,gx
+
+
+  allocate(gd(norb,norb,nts))
+  allocate(gx(norb,norb,nts))
+
+  np=0
+  do i=1,norb
+     do j=1,norb
+        do k=1,norb
+           do l=1,norb
+              if (abs(vint(i,j,k,l))>1.e-12) then
+                 np=np+1
+              end if
+           end do
+        end do
+     end do
+  end do
+
+
+  allocate(U(np))
+  allocate(map(4,np))
+  np=0
+  do i=1,norb
+     do j=1,norb
+        do k=1,norb
+           do l=1,norb
+              if (abs(vint(i,j,k,l))>1.e-12) then
+                 np=np+1
+                 U(np)=vint(i,j,k,l)
+                 map(1,np)=i
+                 map(2,np)=j
+                 map(3,np)=k
+                 map(4,np)=l
+              end if
+           end do
+        end do
+     end do
+  end do
+
+  gd = dcmplx(0.0d0,0.0d0)
+  gx = dcmplx(0.0d0,0.0d0)
+  do t=1,nts
+  do ip=1,np
+
+     do jp=1,np
+        i = map(1,ip)
+        m = map(2,ip)
+        q = map(3,ip)
+        k = map(4,ip)
+
+        j = map(1,jp)
+        n = map(2,jp)
+        l = map(3,jp)
+        p = map(4,jp)
+
+        gd(i,j,t) = gd(i,j,t) + U(ip)*U(jp)*Grt(k,l,t)*Grt(m,n,t)*Grt(p,q,nts-t+1)
+
+        j = map(1,jp)
+        l = map(2,jp)
+        n = map(3,jp)
+        p = map(4,jp)
+
+        gx(i,j,t) = gx(i,j,t) + U(ip)*U(jp)*Grt(k,l,t)*Grt(m,n,t)*Grt(p,q,nts-t+1)
+
+     enddo
+  enddo
+end do
+
+do t=1,nts
+   do i=1,norb
+      do j=1,norb
+         sigma(i,j,t)=2*gd(i,j,t)-gx(i,j,t)
+      end do
+   end do
+
+   
+end do
+
+
+
+
+  deallocate(gd)
+  deallocate(gx)
+  deallocate(U)
+  deallocate(map)
+
+end subroutine calc_sigmaGF2_loc
+
+subroutine read_in_G_from_solver(G_sol,norb)  
+  use gf2, only : nk,nao,iwmax,beta,omegas    
+  implicit none
+  integer norb
+  complex*16, dimension(norb,norb,iwmax)::G_sol
+  integer i,ii,j,jj,k,w,ww,ip
+  double precision tmpr,tmpi
+
+  ip=100
+  open(ip,file="G_sol.txt",status="old")
+  do w=1,iwmax
+     do i=1,norb
+        do j=1,norb
+           read(100,*)ii,jj,ww,tmpr,tmpi
+           G_sol(ii+1,jj+1,ww+1)=dcmplx(tmpr,tmpi)
+        end do
+     end do
+  end do
+  close(100)
+
+end subroutine read_in_G_from_solver
+
+subroutine prepare_ortho_basis(S_k,xmatk)
+  use gf2, only : nk,nao,iwmax,beta,omegas
+  implicit none
+  integer k
+  complex*16, dimension(nao,nao,2*nk) :: S_k,xmatk   
+
+  complex*16, allocatable, dimension(:,:) :: xmat
+  double precision, dimension(:),allocatable::eigval 
+
+
+
+  allocate(xmat(nao,nao)) 
+  allocate(eigval(nao)) 
+
+
+  do k=1,2*nk
+     call compute_ortho_basis_complex(S_k(:,:,k),xmat,nao,eigval)
+     xmatk(:,:,k)=xmat(:,:)
+  end do
+
+
+  deallocate(eigval)
+  deallocate(xmat) 
+
+
+end subroutine prepare_ortho_basis
+
+subroutine transform_k_space_freq_indep_matrices(matrixk,xmatk)
+  use gf2, only : nk,nao,iwmax,beta,omegas,ncell
+  implicit none
+
+  complex*16, dimension(nao,nao,2*nk) :: xmatk,matrixk   
+  complex*16, allocatable, dimension(:,:) ::aux
+  complex*16::alpha,betaz
+  integer::i,j,k
+  alpha=dcmplx(1.0d0,0.0d0)
+  betaz=dcmplx(0.0d0,0.0d0)
+
+  allocate(aux(nao,nao))
+
+  do k=1,2*nk
+     aux=dcmplx(0.0d0,0.0d0)
+     call ZGEMM('t','n',nao,nao,nao,alpha,dconjg(xmatk(:,:,k)),nao,matrixk(:,:,k),nao,betaz,aux,nao)
+     call ZGEMM('n','n',nao,nao,nao,alpha,aux,nao,xmatk(:,:,k),nao,betaz,matrixk(:,:,k),nao)
+  end do
+  
+  deallocate(aux)
+
+
+end subroutine transform_k_space_freq_indep_matrices
+
+
+subroutine prepare_quantities_for_seet(Fk,Sk,siglk,xmatk,sig_sol_loc_ndc,sigma_inf_loc,Grcsw,sigmaw,Gtloc,Sr,Fr,nts,it_seet)
+  use seet
+  use gf2, only : nk,nao,iwmax,beta,omegas,ncell,mu,nleg,power_mesh_small
+  implicit none
+  integer nts
+  complex*16, dimension(nao,nao,2*nk) :: Sk,Fk,xmatk   
+  complex*16, dimension(nao,nao,0:nleg,2*nk) ::siglk
+  complex*16, dimension(nao,nao,iwmax)::sig_sol_loc_ndc,Grcsw,sigmaw
+  complex*16, dimension(nao,nao,nts)::Gtloc
+  complex*16, dimension(nao,nao)::Sr,Fr,sigma_inf_loc
+  integer it_seet
+
+  complex*16, dimension(:,:,:),allocatable :: G1,G2,Grcs
+  complex*16, dimension(:,:),allocatable :: siglr,G_sub_inv
+  integer w,ic,i,j,t,l,k
+  double precision, save::pi=4.D0*DATAN(1.D0)
+  double precision taun
+
+ 
+
+  if (it_seet==1) then
+     call transform_k_space_freq_indep_matrices(Fk,xmatk)   
+
+     do l=0,nleg
+        do i=1,nao
+           do j=1,nao
+              do k=1,2*nk
+                 Sk(i,j,k)=siglk(i,j,l,k)
+              end do
+           end do
+        end do
+        call transform_k_space_freq_indep_matrices(Sk,xmatk)
+        do i=1,nao
+           do j=1,nao
+              do k=1,2*nk
+                 siglk(i,j,l,k)=Sk(i,j,k)
+              end do
+           end do
+        end do        
+     end do
+
+     Sk=dcmplx(0.0d0,0.0d0)
+     do i=1,nao
+        do k=1,2*nk
+           Sk(i,i,k)=dcmplx(1.0d0,0.0d0) 
+        end do
+     end do
+  end if
+
+
+
+
+  allocate(G1(nao,nao,ncell))
+  allocate(G2(nao,nao,ncell))
+  allocate(Grcs(nao,nao,cells_seet))
+  allocate(siglr(nao,nao))
+  allocate(G_sub_inv(nao,nao))
+
+
+
+  !now siglk are transformed. We will prepare the new G(iw,k) and eventually Gr(iw,ic) that will be used to evalute hybridization
+  !here we set G1 and G2 to zero since calc_gwr_inner returns Gr(:,:,ic)=Gr(:,:,ic)-G1(:,:,ic)/omegas(w) for the Fourier transform 
+  !and we do not want to call it this way
+
+  G1=dcmplx(0.0d0,0.0d0)
+  G2=dcmplx(0.0d0,0.0d0)
+  taun=pi
+
+  !we always assume that cells_seet=1. If this is not true then a supercell calculation should be done.
+
+  ic=cells_seet
+  do w =1,iwmax
+     call calc_gwr_inner(w,mu,Grcs,Fk,Sk,sig_sol_loc_ndc(:,:,w),sigma_inf_loc,G1,G2,siglk,cells_seet)
+     Grcsw(:,:,w)=Grcs(:,:,ic)
+  end do
+
+  do i=1,nao
+     G1(i,i,1)=dcmplx(1.0d0,0.0d0)     
+  end do
+  Gtloc=dcmplx(0.0d0,0.0d0)   
+  
+  do w =1,iwmax      
+     do ic=1,cells_seet     
+        Grcs(:,:,ic)=dcmplx(0.0d0,0.0d0)   
+        Grcs(:,:,ic)=Grcsw(:,:,w)-G1(:,:,ic)/omegas(w)-G2(:,:,ic)/(omegas(w)*omegas(w))
+        do t=1,nts
+           taun=power_mesh_small(t)*pi/beta
+           call ft_w_tau_inner(Grcs(:,:,ic),Gtloc(:,:,t),nao,w,taun,beta)
+        end do
+     end do
+  end do
+
+  do t=1,nts
+     do ic=1,cells_seet  
+        Gtloc(:,:,t)=Gtloc(:,:,t)-0.5*G1(:,:,ic)+0.25*G2(:,:,ic)*(-1.0d0*beta+2.0d0*power_mesh_small(t))
+     end do
+  end do
+
+
+  if (it_seet==1) then
+     !first evaluate Sr and Fr
+     Sr=dcmplx(0.0d0,0.0d0)      
+     Fr=dcmplx(0.0d0,0.0d0)      
+     siglr=dcmplx(0.0d0,0.0d0)   
+     do ic=1,cells_seet
+        call FT_k_to_r_ic(Sk(:,:,:), Sr(:,:),ic)
+        call FT_k_to_r_ic(Fk(:,:,:), Fr(:,:),ic)
+     end do
+
+
+     !evaluate self-energy
+     ic=1
+     do w=1,iwmax 
+        do k=1,2*nk
+           call calc_sigw_using_tnl_inner(w,Sk(:,:,k),siglk(:,:,:,k))
+        end do
+        call FT_k_to_r_ic(Sk(:,:,:), sigmaw(:,:,w),ic)
+     end do
+     
+     !now restore Sk to the unity matrix form
+     Sk=dcmplx(0.0d0,0.0d0)
+     do k=1,2*nk
+        do i=1,nao
+           Sk(i,i,k)=dcmplx(1.0d0,0.0d0) 
+        end do
+     end do
+  end if
+
+
+
+  deallocate(G1)
+  deallocate(G2)
+  deallocate(Grcs)
+  deallocate(siglr)
+  deallocate(G_sub_inv)
+
+
+end subroutine prepare_quantities_for_seet
+
+
+subroutine eval_hybrid(sig_sol_loc_ndc,sigma_inf_loc,Grcsw,sigmaw,deltarw,Sr,Fr,norb,sigma_inf_gf2_imp,vint,imp,iter_seet)
+  use seet
+  use gf2,only:iwmax,omegas,mu,nao
+  implicit none
+  integer norb,imp
+  complex*16, dimension(nao,nao,iwmax)::sig_sol_loc_ndc,Grcsw,sigmaw
+  complex*16, dimension(nao,nao)::Sr,Fr,sigma_inf_loc
+  complex*16, dimension(norb,norb)::sigma_inf_gf2_imp
+  complex*16, dimension(norb,norb,iwmax)::deltarw
+  double precision,dimension(norb,norb,norb,norb)::vint
+  complex*16, dimension(:,:),allocatable::G_sub_inv
+  integer i,j,k,l,p,q,r,s,w,ic,ip,iter_seet
+  complex*16 muomega
+  logical exist
+
+
+  allocate(G_sub_inv(norb,norb))
+  !evaluate sigma_inf_imp_gf2
+  !we will use deltarw as a temp array for this purpose and release it
+
+  do w=1,iwmax 
+     do p=1,norb 
+        do q=1,norb 
+           i=imp_orb_numbers(imp,p) 
+           j=imp_orb_numbers(imp,q) 
+           deltarw(p,q,w)=Grcsw(i,j,w)
+        end do
+     end do
+  end do
+
+  
+  if(iter_seet == 1) then
+     call calc_sigma_inf_imp(deltarw,norb,G_sub_inv,vint)
+     do p=1,norb 
+        do q=1,norb 
+           i=imp_orb_numbers(imp,p) 
+           j=imp_orb_numbers(imp,q) 
+           sigma_inf_gf2_imp(i,j)=G_sub_inv(p,q)
+        end do
+     end do
+  end if
+
+  deltarw=dcmplx(0.0d0,0.0d0)
+  G_sub_inv=dcmplx(0.0d0,0.0d0)
+  write(*,*)"For now SEET is implemented only for a single unit cell, if more cells are desied use supercell option"
+  call flush(6)
+
+
+!  ip=100
+!  inquire(file="G_sol.txt", exist=exist)
+!  if (exist) then
+!     open(ip,file="G_sol.txt",status="old")
+!     rewind(100)
+!  else
+!     open(ip,file="G_sol.txt",status="new",action="READWRITE")
+!  end if
+  ic=cells_seet   
+  do w=1,iwmax
+     muomega =omegas(w)+mu
+     do p=1,norb
+        do q=1,norb
+           i=imp_orb_numbers(imp,p)
+           j=imp_orb_numbers(imp,q)
+           G_sub_inv(p,q)=Grcsw(i,j,w)
+!           write(*,*)p,q,w,dble(Grcsw(i,j,w)),dimag(Grcsw(i,j,w))
+!           write(100,*)p,q,w,dble(Grcsw(i,j,w)),dimag(Grcsw(i,j,w))
+        end do
+     end do
+     call invert_complex_matrix(norb,G_sub_inv)
+     do p=1,norb
+        do q=1,norb
+           i=imp_orb_numbers(imp,p)
+           j=imp_orb_numbers(imp,q)
+           deltarw(p,q,w)=muomega*Sr(i,j)-Fr(i,j)-sigma_inf_loc(i,j)-sigmaw(i,j,w)-sig_sol_loc_ndc(i,j,w)-G_sub_inv(p,q)
+        end do
+     end do
+  end do
+!  close(100)
+
+  ip=1
+  inquire(file="delta.txt", exist=exist)
+  if (exist) then
+     open(ip,file="delta.txt",status="old")
+     rewind(1)
+  else
+     open(ip,file="delta.txt",status="new",action="READWRITE")
+  end if
+
+  ip=10
+
+  inquire(file="sigmaw_sub.txt", exist=exist)
+  if (exist) then
+     open(ip,file="sigmaw_sub.txt",status="old")
+     rewind(10)
+  else
+     open(ip,file="sigmaw_sub.txt",status="new",action="READWRITE")
+  end if
+
+  ip=20
+
+  inquire(file="fock_sub.txt", exist=exist)
+  if (exist) then
+     open(ip,file="fock_sub.txt",status="old")
+     rewind(20)
+  else
+     open(ip,file="fock_sub.txt",status="new",action="READWRITE")
+  end if
+
+  ip=40
+
+  inquire(file="mu.txt", exist=exist)
+  if (exist) then
+     open(ip,file="mu.txt",status="old")
+     rewind(20)
+  else
+     open(ip,file="mu.txt",status="new",action="READWRITE")
+  end if
+
+
+  ip=60
+
+  inquire(file="sigma_inf_dc.txt", exist=exist)
+  if (exist) then
+     open(ip,file="sigma_inf_dc.txt",status="old")
+     rewind(60)
+  else
+     open(ip,file="sigma_inf_dc.txt",status="new",action="READWRITE")
+  end if
+
+  ip=70
+  inquire(file="fort.3010", exist=exist)
+  if (exist) then
+     open(ip,file="fort.3010",status="old")
+     rewind(60)
+  else
+     open(ip,file="fort.3010",status="new",action="READWRITE")
+  end if
+
+  write(70,"(I3)") norb
+
+     do p=1,norb
+        do q=1,norb
+           i=imp_orb_numbers(imp,p)
+           j=imp_orb_numbers(imp,q)
+           write(20,*)i,j,dble(Fr(i,j)-sigma_inf_gf2_imp(i,j))
+           write(60,*)i,j,dble(sigma_inf_gf2_imp(p,q))
+           do w=1,iwmax
+              if(w < 5001) then
+                 write(1,*)i,j,w,dble(deltarw(i,j,w)),dimag(deltarw(i,j,w))
+              end if
+              write(10,*)i,j,w,dble(sigmaw(i,j,w)+sig_sol_loc_ndc(i,j,w)+sigma_inf_loc(i,j)),dimag(sigmaw(i,j,w)+sig_sol_loc_ndc(i,j,w)+sigma_inf_loc(i,j))
+           end do
+           do r=1,norb
+              do s=1,norb
+                 write(70,"(F10.6)") dble(vint(p,q,r,s))
+              end do
+           end do
+!           do t=1,nts
+!              write(30,*)i,j,dble(Gtloc(i,j,ic,t))
+!           end do
+        end do
+     end do
+  close(1)
+  close(10)
+  close(20)
+  close(30)
+  write(40,*)mu
+  close(40)
+  close(60)
+  close(70)
+
+  deallocate(G_sub_inv)
+
+
+end subroutine eval_hybrid
+
+
+subroutine prepare_density_matrix_basis(S_k,xmatk,dm_eig_k,dm_r)
+
+  use gf2, only : nk,nao,iwmax,beta,omegas,ncell
+  implicit none
+  complex*16, dimension(nao,nao,2*nk) :: S_k,xmatk   
+  complex*16, dimension(nao,nao,ncell) :: dm_r
+  complex*16, dimension(nao,2*nk) :: dm_eig_k
+
+  complex*16, allocatable, dimension(:,:) :: xmat,dmk,aux
+  integer::lwork,LRWORK,LIWORK
+  complex*16, dimension(:),allocatable::work
+  double precision, dimension(:),allocatable::eigval,rwork
+  integer, dimension(:),allocatable::iwork
+  integer:: io
+  complex*16::alpha,betaz
+  integer::i,j,k,ndim
+  alpha=dcmplx(1.0d0,0.0d0)
+  betaz=dcmplx(0.0d0,0.0d0)
+
+  ndim=nao
+  allocate(aux(ndim,ndim))
+  allocate(eigval(ndim))
+  lwork=2*ndim + ndim**2
+  allocate(work(lwork))
+  LRWORK=1 + 5*ndim + 2*ndim**2
+  LIWORK=3 + 5*ndim  
+  allocate(rwork(LRWORK))
+  allocate(iwork(LIWORK))
+
+  dm_eig_k=dcmplx(0.0d0,0.0d0) 
+  xmatk=dcmplx(0.0d0,0.0d0)   
+  allocate(xmat(nao,nao)) 
+  allocate(dmk(nao,nao)) 
+
+
+  do k=1,2*nk
+     dmk=dcmplx(0.0d0,0.0d0)
+     xmat=dcmplx(0.0d0,0.0d0)  
+
+     call compute_ortho_basis_complex(S_k(:,:,k),xmat,nao)
+     call FT_r_to_single_k(dmk,dble(dm_r),k)
+     !----transforming the density matrix for a given k-point to an orthogonal basis----!
+     call invert_complex_matrix(nao,xmat)
+     call ZGEMM('n','n',nao,nao,nao,alpha,xmat,nao,dmk,nao,betaz,aux,nao)
+     call ZGEMM('t','n',nao,nao,nao,alpha,aux,nao,conjg(xmat),nao,betaz,dmk,nao)
+
+     eigval(:)=0.0
+     call ZHEEVD('V','U',nao,dmk,nao,eigval,work(1),lwork,rwork(1),LRWORK, IWORK,LIWORK,io)
+     !ZHEEVD( JOBZ, UPLO, N, A, LDA, W, WORK, LWORK, RWORK,
+!     $                   LRWORK, IWORK, LIWORK, INFO )
+     ! ZHEEV computes all eigenvalues and, optionally, eigenvectors of a
+     ! complex Hermitian matrix A.
+     if (io .ne. 0) then
+        write(*,*)"something went wrong with compute_diag_basis_complex (ZHEEVD)"
+        call flush(6)
+        stop
+     end if
+     !now you need to make the AO to NO basis transformation
+     call ZGEMM('n','n',nao,nao,nao,alpha,xmat,nao,dmk,nao,betaz,xmatk(:,:,k),nao)
+     dm_eig_k(:,k)=eigval(:)
+  end do
+  deallocate(xmat) 
+  deallocate(dmk) 
+  deallocate(aux)
+  deallocate(eigval)
+  deallocate(work)
+  deallocate(rwork)
+  deallocate(iwork)
+  
+end subroutine prepare_density_matrix_basis
+
+
+subroutine read_in_info_for_seet
+  use seet
+  implicit none
+  integer i,j,ip,dm_b
+  logical exist
+  
+  ip = 77708
+  inquire(file="seet.inp", exist=exist) 
+  If(.not.exist) then
+    call timest('seet input file is missing. Calculation aborted')
+    stop
+  Endif
+  open(ip,file='seet.inp',status='old')
+  call fetch_i(num_imp ,    'num_imp    ',ip)
+  allocate(num_orb_in_imps(num_imp))
+  num_orb_in_imps=0
+  do i=1,num_imp
+     call fetch_i(num_orb_in_imps(i),         'num_orb_in_imps        ',ip)
+  end do
+  max_imp_orb=maxval(num_orb_in_imps)
+  allocate(imp_orb_numbers(num_imp,max_imp_orb))
+  imp_orb_numbers=0
+  do i=1,num_imp   
+     do j=1,num_orb_in_imps(i)
+        call fetch_i(imp_orb_numbers(i,j),          'imp_orb_numbers         ',ip)
+     end do
+  end do
+
+  ortho_basis=.False.  
+  call fetch_i(ortho_basis ,    'ortho_basis   ',ip)
+
+  dm_basis=.False.
+  call fetch_i(dm_basis ,    'dm_basis   ',ip)
+
+  call fetch_i(niter_seet ,    'niter_seet   ',ip)
+  write(*,*)"niter_seet",niter_seet
+  call flush(6)
+
+  call fetch_i(fock_reeval ,    'fock_reeval   ',ip)
+  call fetch_i(HF_SEET ,    'HF_SEET   ',ip)
+
+  !call fetch_i(seet_gf2_iter ,    'seet_gf2_iter ',ip)       
+  
+  close(ip)
+
+end subroutine read_in_info_for_seet
+
+subroutine transform_impurity_vint(wannier,vintf,vint,norb,imp)
+ use gf2, only: nao, ncell
+ use seet
+ implicit none
+ integer imp
+ integer norb
+ double precision,dimension(nao*ncell,nao*ncell,nao*ncell,nao*ncell)::vintf
+ double precision,dimension(norb,norb,norb,norb)::vint
+ double precision,dimension(nao*ncell,nao)::wannier
+ double precision,dimension(:,:,:,:),allocatable::vita,vitb,vitc
+
+ integer i,j,k,l,l1,k1,j1,i1
+ integer ii,jj,kk,ll
+ integer ic,jc,kc,lc,nf
+
+ nf=nao*ncell
+ allocate(vita(nf,nf,nf,norb))  
+ vita=0.0d0 
+ 
+ do ll=1,norb
+    l1=imp_orb_numbers(imp,ll)
+
+    do ic=1,ncell
+       do i=1,nao
+
+          do jc=1,ncell
+             do j=1,nao
+                
+                do kc=1,ncell
+                   do k=1,nao
+                      
+                      do lc=1,ncell
+                         do l=1,nao 
+                            vita((ic-1)*nao+i,(jc-1)*nao+j,(kc-1)*nao+k,ll)=vita((ic-1)*nao+i,(jc-1)*nao+j,(kc-1)*nao+k,ll)+vintf((ic-1)*nao+i,(jc-1)*nao+j,(kc-1)*nao+k,(lc-1)*nao+l)*wannier((lc-1)*nao+l,l1)
+                         end do
+                      end do
+
+                   end do
+                end do
+
+             end do
+          end do
+
+       end do
+    end do
+
+ end do
+
+ allocate(vitb(nf,nf,norb,norb))  
+ vitb=0.0d0
+
+ do kk=1,norb
+    k1=imp_orb_numbers(imp,kk)
+
+    do ll=1,norb
+
+       do ic=1,ncell
+          do i=1,nao
+
+             do jc=1,ncell
+                do j=1,nao
+                
+                   do kc=1,ncell
+                      do k=1,nao
+                      
+                         vitb((ic-1)*nao+i,(jc-1)*nao+j,kk,ll)=vitb((ic-1)*nao+i,(jc-1)*nao+j,kk,ll)+vita((ic-1)*nao+i,(jc-1)*nao+j,(kc-1)*nao+k,ll)*wannier((kc-1)*nao+k,k1) 
+ 
+                      end do
+                   end do
+
+                end do
+             end do
+
+          end do
+       end do
+
+    end do
+
+ end do
+
+ deallocate(vita)
+
+ allocate(vitc(nf,norb,norb,norb))
+ vitc=0.0d0
+
+ do jj=1,norb
+    j1=imp_orb_numbers(imp,jj)
+
+    do ll=1,norb
+
+       do kk=1,norb 
+
+          do ic=1,ncell
+             do i=1,nao
+
+                do jc=1,ncell
+                   do j=1,nao
+                
+                      vitc((ic-1)*nao+i,jj,kk,ll)=vitc((ic-1)*nao+i,jj,kk,ll)+vitb((ic-1)*nao+i,(jc-1)*nao+j,kk,ll)*wannier((jc-1)*nao+j,j1) 
+                            
+                   end do
+                end do
+
+             end do
+          end do
+       
+       end do
+
+    end do
+
+ end do
+
+ deallocate(vitb)
+ vint=0.0d0
+
+ do ii=1,norb
+    i1=imp_orb_numbers(imp,ii)
+
+    do ll=1,norb
+
+       do kk=1,norb 
+
+          do jj=1,norb  
+
+             do ic=1,ncell
+                do i=1,nao
+
+                   vint(ii,jj,kk,ll)=vint(ii,jj,kk,ll)+vitc((ic-1)*nao+i,jj,kk,ll)*wannier((ic-1)*nao+i,i1) 
+                            
+                end do
+             end do
+
+          end do
+       
+       end do
+
+    end do
+
+ end do
+
+ deallocate(vitc)
+
+end subroutine transform_impurity_vint
+  
