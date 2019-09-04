@@ -1,0 +1,3 @@
+#!/bin/sh
+
+ifort -O3 -g -openmp *.f90 -mkl=sequential
